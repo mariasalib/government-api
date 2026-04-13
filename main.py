@@ -7,11 +7,6 @@ import os
 app = FastAPI()
 
 def get_conn():
-    return mysql.connector.connect(
-        host="mysql-18922077-mariasalib95-7600.h.aivencloud.com",
-        port=28276,
-        user="avnadmin",
-        password=os.getenv("DB_PASSWORD"),
         database="defaultdb"
     )
 
@@ -21,12 +16,23 @@ class User(BaseModel):
     gender: str
     birthdate: str
     country: str
-    age: int
+    age: str
 
 class Usage(BaseModel):
-    user_email: str
-    dataset_identifier: str
-    project_type: str
+    dataset_id: str
+    email: str
+
+class OrgType(BaseModel):
+    org_type: str
+
+class FormatType(BaseModel):
+    fmt: str
+
+class TagName(BaseModel):
+    tag: str
+
+class UserEmail(BaseModel):
+    email: str
 
 @app.get("/")
 def home():
@@ -38,15 +44,14 @@ def register_user(user: User):
     cur = conn.cursor()
     try:
         cur.execute(
-            "INSERT INTO users VALUES (%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO users (Email, Username, gender, Birthdate, Country, Age) VALUES (%s,%s,%s,%s,%s,%s)",
             (user.email, user.username, user.gender, user.birthdate, user.country, user.age)
         )
         conn.commit()
-        return {"message": "user registered"}
+        conn.close()
+        return {"message": "User registered successfully"}
     except mysql.connector.Error as e:
         raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        conn.close()
 
 @app.post("/usage")
 def add_usage(usage: Usage):
@@ -54,147 +59,176 @@ def add_usage(usage: Usage):
     cur = conn.cursor()
     try:
         cur.execute(
-            "INSERT INTO datasetuser VALUES (%s,%s,%s)",
-            (usage.user_email, usage.dataset_identifier, usage.project_type)
+            "INSERT INTO datasetuser (Dataset_Identifier, User_Email) VALUES (%s,%s)",
+            (usage.dataset_id, usage.email)
         )
         conn.commit()
-        return {"message": "usage added"}
+        conn.close()
+        return {"message": "Usage added"}
     except mysql.connector.Error as e:
         raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        conn.close()
 
-@app.get("/user-usage/{email}")
-def get_user_usage(email: str):
+@app.post("/view-usage")
+def view_usage(user: UserEmail):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM datasetuser WHERE User_Email=%s",
-        (email,)
-    )
+    cur.execute("""
+        SELECT Dataset_Identifier
+        FROM datasetuser
+        WHERE User_Email=%s
+    """, (user.email,))
     result = cur.fetchall()
     conn.close()
-    return result
+    return [{"Dataset": r[0]} for r in result]
 
-@app.get("/datasets-by-org-type")
-def datasets_by_org_type(org_type: str):
+@app.post("/datasets-by-orgtype")
+def datasets_by_orgtype(org: OrgType):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM dataset WHERE Publishing_Organization_Type=%s",
-        (org_type,)
-    )
+    cur.execute("""
+        SELECT d.Identifier, d.Dataset_Name
+        FROM dataset d
+        JOIN publishingorganization p
+        ON d.Publishing_Organization_Name = p.Organization_Name
+        WHERE p.Organization_Type=%s
+    """, (org.org_type,))
     result = cur.fetchall()
     conn.close()
-    return result
+    return [{"Identifier": r[0], "Dataset_Name": r[1]} for r in result]
 
 @app.get("/top-orgs")
 def top_orgs():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT Publishing_Organization_Name, COUNT(*) c
+        SELECT Publishing_Organization_Name, COUNT(*)
         FROM dataset
         GROUP BY Publishing_Organization_Name
-        ORDER BY c DESC
+        ORDER BY COUNT(*) DESC
         LIMIT 5
     """)
     result = cur.fetchall()
     conn.close()
-    return result
+    return [{"Organization": r[0], "Count": r[1]} for r in result]
 
-@app.get("/datasets-by-format")
-def datasets_by_format(format: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM dataset WHERE Format=%s",
-        (format,)
-    )
-    result = cur.fetchall()
-    conn.close()
-    return result
-
-@app.get("/datasets-by-tag")
-def datasets_by_tag(tag: str):
+@app.post("/datasets-by-format")
+def datasets_by_format(fmt: FormatType):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT d.*
+        SELECT d.Identifier, d.Dataset_Name
+        FROM dataset d
+        JOIN datasetformat f ON d.Identifier=f.Dataset_Identifier
+        WHERE f.Format_Type=%s
+    """, (fmt.fmt,))
+    result = cur.fetchall()
+    conn.close()
+    return [{"Identifier": r[0], "Dataset_Name": r[1]} for r in result]
+
+@app.post("/datasets-by-tag")
+def datasets_by_tag(tag: TagName):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT d.Identifier, d.Dataset_Name
         FROM dataset d
         JOIN datasettag t ON d.Identifier=t.Dataset_Identifier
         WHERE t.Tag_Name=%s
-    """, (tag,))
+    """, (tag.tag,))
     result = cur.fetchall()
     conn.close()
-    return result
+    return [{"Identifier": r[0], "Dataset_Name": r[1]} for r in result]
 
-@app.get("/stats")
-def get_stats():
+@app.get("/contributions")
+def contributions():
     conn = get_conn()
     cur = conn.cursor()
+    
+    cur.execute("SELECT Publishing_Organization_Name, COUNT(*) FROM dataset GROUP BY Publishing_Organization_Name")
+    by_org = cur.fetchall()
+    
+    cur.execute("SELECT Topic, COUNT(*) FROM dataset GROUP BY Topic")
+    by_topic = cur.fetchall()
+    
     cur.execute("""
-        SELECT 
-            Publishing_Organization_Name,
-            Topic,
-            Format,
-            Publishing_Organization_Type,
-            COUNT(*) as total
-        FROM dataset
-        GROUP BY Publishing_Organization_Name, Topic, Format, Publishing_Organization_Type
+        SELECT f.Format_Type, COUNT(*)
+        FROM dataset d
+        JOIN datasetformat f ON d.Identifier=f.Dataset_Identifier
+        GROUP BY f.Format_Type
     """)
-    result = cur.fetchall()
+    by_format = cur.fetchall()
+    
+    cur.execute("""
+        SELECT p.Organization_Type, COUNT(*)
+        FROM dataset d
+        JOIN publishingorganization p
+        ON d.Publishing_Organization_Name=p.Organization_Name
+        GROUP BY p.Organization_Type
+    """)
+    by_org_type = cur.fetchall()
+    
     conn.close()
-    return result
+    return {
+        "by_organization": [{"Organization": r[0], "Count": r[1]} for r in by_org],
+        "by_topic": [{"Topic": r[0], "Count": r[1]} for r in by_topic],
+        "by_format": [{"Format": r[0], "Count": r[1]} for r in by_format],
+        "by_organization_type": [{"Type": r[0], "Count": r[1]} for r in by_org_type]
+    }
 
 @app.get("/top-datasets")
 def top_datasets():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT Dataset_Identifier, COUNT(*) c
+        SELECT Dataset_Identifier, COUNT(*)
         FROM datasetuser
         GROUP BY Dataset_Identifier
-        ORDER BY c DESC
+        ORDER BY COUNT(*) DESC
         LIMIT 5
     """)
     result = cur.fetchall()
     conn.close()
-    return result
+    return [{"Dataset": r[0], "Count": r[1]} for r in result]
 
 @app.get("/usage-by-project-type")
 def usage_by_project_type():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT Project_Type, COUNT(*) as count
-        FROM datasetuser
-        GROUP BY Project_Type
+        SELECT Project_Category, COUNT(*)
+        FROM project
+        GROUP BY Project_Category
     """)
     result = cur.fetchall()
     conn.close()
-    return result
+    return [{"Project_Category": r[0], "Count": r[1]} for r in result]
 
-@app.get("/top-tags-by-project-type")
-def top_tags_by_project_type():
+@app.get("/top-tags")
+def top_tags():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT du.Project_Type, dt.Tag_Name, COUNT(*) as count
-        FROM datasetuser du
-        JOIN datasettag dt ON du.Dataset_Identifier = dt.Dataset_Identifier
-        GROUP BY du.Project_Type, dt.Tag_Name
-        ORDER BY du.Project_Type, count DESC
+        SELECT p.Project_Category, t.Tag_Name, COUNT(*) c
+        FROM project p
+        JOIN datasettag t ON p.Dataset_Identifier=t.Dataset_Identifier
+        GROUP BY p.Project_Category, t.Tag_Name
+        ORDER BY p.Project_Category, c DESC
     """)
-    result = cur.fetchall()
-    
-    organized = {}
-    for row in result:
-        project_type, tag, count = row
-        if project_type not in organized:
-            organized[project_type] = []
-        if len(organized[project_type]) < 10:
-            organized[project_type].append({"tag": tag, "count": count})
-    
+    data = cur.fetchall()
     conn.close()
-    return organized
+    
+    result = {}
+    current = None
+    count = 0
+    
+    for row in data:
+        category, tag, c = row
+        if category != current:
+            current = category
+            count = 0
+            result[category] = []
+        if count < 10:
+            result[category].append({"Tag": tag, "Count": c})
+            count += 1
+    
+    return result
